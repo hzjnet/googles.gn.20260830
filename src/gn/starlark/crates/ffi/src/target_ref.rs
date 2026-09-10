@@ -69,6 +69,7 @@ impl<'v> AllocValue<'v> for TargetRef {
 impl types::TargetRef for TargetRef {
     type Cxx = crate::bridge::CxxTarget;
     type Rule = rule::FrozenRule<crate::eval_context::EvalContext>;
+    type Session = crate::Session;
 
     fn label(&self) -> LabelRef<'_> {
         self.0.label().as_ref()
@@ -79,23 +80,104 @@ impl types::TargetRef for TargetRef {
     }
 
     fn rule(&self) -> Option<&'static Self::Rule> {
-        todo!()
+        self.0.starlark.as_ref().map(|s| s.rule.as_ref())
     }
 
     fn outputs(&self) -> Vec<types::File> {
         todo!()
     }
 
-    fn target_out_dir(&self, _prefix: &str, _suffix: &str, _separator: &str) -> String {
-        todo!()
+    fn target_out_dir(
+        &self,
+        toolchain_prefix: &str,
+        label_prefix: &str,
+        package_name_separator: &str,
+    ) -> String {
+        let mut out = String::new();
+        out.push_str(toolchain_prefix);
+        if !self.0.settings().is_default() {
+            out.push_str(self.toolchain().name());
+            out.push('/');
+        }
+        out.push_str(label_prefix);
+        out.push_str(self.label().package().as_source_relative());
+        out.push_str(package_name_separator);
+        out.push_str(self.label().name());
+        out
     }
 
     fn output_type(&self) -> Option<types::OutputType> {
-        todo!()
+        types::OutputType::from_u8(self.0.output_type())
     }
 
-    fn builtin_attrs<'v>(&self, _heap: &Heap<'v>) -> Vec<Value<'v>> {
-        todo!()
+    fn builtin_attrs<'v>(&self, session: &Self::Session, heap: &Heap<'v>) -> Vec<Value<'v>> {
+        let Some(output_type) = self.output_type() else {
+            return vec![];
+        };
+        let mut attrs = vec![];
+        let settings = self.0.settings();
+        // The order here needs to match the order in OutputType::attrs
+        if output_type.has_sources() {
+            attrs.push(heap.alloc(if self.0.all_headers_public() {
+                self.0
+                    .sources()
+                    .iter()
+                    .filter(|s| !s.is_header())
+                    .map(|s| heap.alloc(s.to_rust(settings)))
+                    .collect::<Vec<_>>()
+            } else {
+                self.0
+                    .sources()
+                    .iter()
+                    .map(|s| heap.alloc(s.to_rust(settings)))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        if output_type.has_public() {
+            attrs.push(heap.alloc(if self.0.all_headers_public() {
+                self.0
+                    .sources()
+                    .iter()
+                    .filter(|s| s.is_header())
+                    .map(|s| heap.alloc(s.to_rust(settings)))
+                    .collect::<Vec<_>>()
+            } else {
+                self.0
+                    .public_headers()
+                    .iter()
+                    .map(|s| heap.alloc(s.to_rust(settings)))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        if output_type.has_deps() {
+            attrs.push(
+                heap.alloc(
+                    self.0
+                        .private_deps()
+                        .iter()
+                        .map(|target| heap.alloc(target.to_rust(session)))
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+        if output_type.has_public_deps() {
+            attrs.push(
+                heap.alloc(
+                    self.0
+                        .public_deps()
+                        .iter()
+                        .map(|target| heap.alloc(target.to_rust(session)))
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+        attrs
+    }
+}
+
+impl attr::TargetAttrExt for TargetRef {
+    fn attrs(&self) -> &[attr::Attr] {
+        self.0.starlark.as_ref().map_or(&[], |s| s.attrs.as_slice())
     }
 }
 
@@ -112,5 +194,14 @@ impl types::TargetMut for crate::bridge::CxxTarget {
             toolchain.package().as_str(),
             toolchain.name(),
         );
+    }
+}
+
+impl crate::bridge::LabelTargetPair {
+    /// Returns the resolved target.
+    ///
+    /// Must only be called if the target is already resolved.
+    pub fn to_rust(&self, session: &crate::Session) -> TargetRef {
+        crate::bridge::label_target_pair_target(self).to_rust(session)
     }
 }

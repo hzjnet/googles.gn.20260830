@@ -2,25 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::ptr::NonNull;
+use starlark::values::FrozenValueTyped;
 
-#[derive(Copy, Clone)]
+use crate::{eval_context::EvalContext, TargetRef};
+
+pub(crate) struct StarlarkTarget {
+    pub(crate) rule: FrozenValueTyped<'static, rule::FrozenRule<EvalContext>>,
+    pub(crate) attrs: Vec<attr::Attr>,
+}
+
 pub struct Target {
     // We maintain a 0-1 relationship between starlark Targets and rust targets.
     // starlark targets store a reference to C++ targets, and C++ targets store an optional
     // reference to starlark targets.
-    pub(crate) cxx: NonNull<crate::bridge::CxxTarget>,
-    // Note: This is not a lightweight reference type.
-    // Fields such as rules, attr, and providers will be added in the future.
+    pub(crate) cxx: &'static crate::bridge::CxxTarget,
+    pub(crate) starlark: Option<StarlarkTarget>,
 }
 
 impl std::ops::Deref for Target {
     type Target = crate::bridge::CxxTarget;
 
     fn deref(&self) -> &Self::Target {
-        // Safety: The C++ Target pointer is guaranteed to be valid and live for the
-        // duration of the build evaluation.
-        unsafe { self.cxx.as_ref() }
+        self.cxx
     }
 }
 
@@ -39,6 +42,11 @@ unsafe impl Send for Target {}
 unsafe impl Sync for Target {}
 
 impl crate::bridge::CxxTarget {
+    /// Returns the output type of the target as a u8 discriminant.
+    pub fn output_type(&self) -> u8 {
+        crate::bridge::output_type_u8(self)
+    }
+
     /// Returns the settings for the target.
     pub fn settings(&self) -> &crate::Settings {
         // Safety: Settings pointer is always valid and non-null on constructed Targets.
@@ -48,5 +56,11 @@ impl crate::bridge::CxxTarget {
     /// Returns the toolchain label for the target.
     pub fn toolchain(&self) -> types::LabelRef<'_> {
         self.settings().toolchain_label().as_ref()
+    }
+
+    /// Returns a reference to the associated Rust Target, registering it with
+    /// the session if it doesn't exist yet.
+    pub fn to_rust(&self, session: &crate::Session) -> TargetRef {
+        TargetRef(self.rust_target(session))
     }
 }

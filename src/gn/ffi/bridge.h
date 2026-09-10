@@ -4,14 +4,17 @@
 #include "gn/err.h"
 #include "gn/ffi/err.h"
 #include "gn/ffi/scope.h"
+#include "gn/ffi/source_file.h"
 #include "gn/ffi/target.h"
 #include "gn/ffi/test_with_scope.h"
 #include "gn/ffi/value.h"
 #include "gn/label.h"
+#include "gn/label_ptr.h"
 #include "gn/output_file.h"
 #include "gn/scope.h"
 #include "gn/settings.h"
 #include "gn/source_dir.h"
+#include "gn/source_file.h"
 #include "gn/target.h"
 #include "gn/test_with_scope.h"
 #include "gn/value.h"
@@ -751,12 +754,15 @@ using InputFile = ::InputFile;
 using OutputFile = ::OutputFile;
 using SourceDir = ::SourceDir;
 using Label = ::Label;
+using SourceFile = ::SourceFile;
+using LabelTargetPair = ::LabelTargetPair;
 using Target = ::Target;
 using Settings = ::Settings;
 using Scope = ::Scope;
 using TestWithScope = ::TestWithScope;
 using Value = ::Value;
 using ParseNode = ::ParseNode;
+struct RustTarget;
 struct Session;
 struct OwnedFrozenValue;
 
@@ -811,11 +817,26 @@ enum class ValueType : ::std::uint8_t {
 };
 #endif // CXXBRIDGE1_ENUM_ValueType
 
+#ifndef CXXBRIDGE1_STRUCT_RustTarget
+#define CXXBRIDGE1_STRUCT_RustTarget
+struct RustTarget final : public ::rust::Opaque {
+  ~RustTarget() = delete;
+
+private:
+  friend ::rust::layout;
+  struct layout {
+    static ::std::size_t size() noexcept;
+    static ::std::size_t align() noexcept;
+  };
+};
+#endif // CXXBRIDGE1_STRUCT_RustTarget
+
 #ifndef CXXBRIDGE1_STRUCT_Session
 #define CXXBRIDGE1_STRUCT_Session
 struct Session final : public ::rust::Opaque {
   static ::rust::Box<::Session> new_cxx(::rust::Str source_root, ::rust::Str source_root_rel) noexcept;
   static ::rust::Box<::Session> new_for_testing() noexcept;
+  ::RustTarget const &register_cxx_target(::Target const &target) const noexcept;
   void load_values(::rust::Str label, ::rust::Str relative_to, ::rust::Slice<::rust::Str const> keys, ::Scope &scope, ::Settings const &settings, ::ParseNodePtr origin, ::Err &err) const noexcept;
   ~Session() = delete;
 
