@@ -12,6 +12,7 @@
 #include "gn/command_format.h"
 #include "gn/edit_subcommands.h"
 #include "gn/filesystem_utils.h"
+#include "gn/functions.h"
 #include "gn/input_file.h"
 #include "gn/label.h"
 #include "gn/loader.h"
@@ -158,6 +159,112 @@ Result<std::vector<SourceFile>> ResolvePatternToFiles(
   return matched_files;
 }
 
+// See style_guide.md, "Ordering within a target"
+std::optional<int> GetAttributeOrder(std::string_view attribute) {
+  // 100 => Target metadata
+  if (attribute == "output_name" || attribute == "output_prefix_override" ||
+      attribute == "output_dir" || attribute == "output_extension") {
+    return 100;
+  } else if (attribute == "visibility") {
+    return 110;
+  } else if (attribute == "testonly") {
+    return 120;
+  } else if (attribute == "friend") {
+    return 130;
+    // 200 => inputs / outputs
+  } else if (attribute == "script") {
+    return 200;
+  } else if (attribute == "args") {
+    return 210;
+  } else if (attribute == "sources") {
+    return 220;
+  } else if (attribute == "public") {
+    return 230;
+  } else if (attribute == "inputs") {
+    return 240;
+  } else if (attribute == "outputs") {
+    return 250;
+  } else if (attribute == "depfile" || attribute == "response_file_contents") {
+    return 260;
+    // 300 => config
+  } else if (attribute == "defines" || attribute == "include_dirs" ||
+             attribute.starts_with("cflags") || attribute == "asmflags" ||
+             attribute == "ldflags" || attribute == "arflags" ||
+             attribute == "data" || attribute == "rustflags" ||
+             attribute.ends_with("configs")) {
+    return 300;
+    // 400 => deps
+  } else if (attribute == "public_deps") {
+    return 400;
+  } else if (attribute == "deps") {
+    return 410;
+  } else if (attribute == "data_deps") {
+    return 420;
+  } else {
+    return std::nullopt;
+  }
+}
+
+std::optional<int> GetOrder(const ParseNode* node);
+
+std::vector<std::optional<int>> GetOrders(
+    const std::vector<std::unique_ptr<ParseNode>>& nodes) {
+  std::vector<std::optional<int>> orders;
+  orders.reserve(nodes.size());
+  for (const auto& node : nodes) {
+    orders.push_back(GetOrder(node.get()));
+  }
+  return orders;
+}
+
+std::optional<int> GetOrder(const ParseNode* node) {
+  if (!node)
+    return std::nullopt;
+
+  if (const auto* op = node->AsBinaryOp()) {
+    if (op->op().type() == Token::EQUAL ||
+        op->op().type() == Token::PLUS_EQUALS ||
+        op->op().type() == Token::MINUS_EQUALS) {
+      if (const auto* id = op->left()->AsIdentifier()) {
+        return GetAttributeOrder(id->value().value());
+      }
+    }
+  } else if (const auto* condition = node->AsCondition()) {
+    std::vector<std::optional<int>> orders;
+    if (condition->if_true()) {
+      auto true_orders = GetOrders(condition->if_true()->statements());
+      orders.insert(orders.end(), true_orders.begin(), true_orders.end());
+    }
+    if (const auto* if_false = condition->if_false()) {
+      if (const auto* block = if_false->AsBlock()) {
+        auto false_orders = GetOrders(block->statements());
+        orders.insert(orders.end(), false_orders.begin(), false_orders.end());
+      } else if (auto false_order = GetOrder(if_false)) {
+        orders.push_back(false_order);
+      }
+    }
+    // The style guide says:
+    // Simple conditions affecting just one variable (e.g. adding a single
+    // source or adding a flag for one particular OS) can go beneath the
+    // variable they affect. More complicated conditions affecting more than
+    // one thing should go at the bottom.
+    std::optional<int> result = std::nullopt;
+    for (const auto& order : orders) {
+      if (order && result && order != result) {
+        // Affects more than one thing, goes to the bottom
+        return std::numeric_limits<int>::max();
+      } else if (!result) {
+        result = order;
+      }
+    }
+    if (result) {
+      // Affects a single variable.
+      return *result;
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 std::optional<std::string> AsStringLiteral(const ParseNode* node) {
@@ -214,6 +321,26 @@ std::optional<ListNode*> FindListInAssignment(const TreeNode& assignment) {
   if (results.empty())
     return std::nullopt;
   return results.front();
+}
+
+bool IsEmptyList(const ParseNode* node) {
+  auto* list = node->AsList();
+  return list && list->contents().empty();
+}
+
+std::unique_ptr<ParseNode> SimplifyExpression(std::unique_ptr<ParseNode> expr) {
+  // We could recurse into minuses, but `gn edit` never modifies anything in a
+  // minus, so no need to simplify.
+  if (auto op = expr->AsBinaryOpMut(); op && op->op().type() == Token::PLUS) {
+    op->set_left(SimplifyExpression(op->take_left()));
+    op->set_right(SimplifyExpression(op->take_right()));
+    if (IsEmptyList(op->left())) {
+      return op->take_right();
+    } else if (IsEmptyList(op->right())) {
+      return op->take_left();
+    }
+  }
+  return expr;
 }
 
 TreeNode TreeNode::Descend(ParseNode* child) const {
@@ -446,10 +573,16 @@ std::vector<EditTarget> BuildFile::targets(
       tree_root_.get(),
       [this, &filter](TreeNode& node_ref) -> std::optional<EditTarget> {
         if (auto* func = node_ref->AsFunctionCallMut()) {
-          if (func->block() && func->args() &&
-              func->args()->contents().size() == 1) {
-            if (auto name =
-                    AsStringLiteral(func->args()->contents()[0].get())) {
+          if (func->block() && func->args()) {
+            std::optional<std::string> name;
+            const auto& args = func->args()->contents();
+            if (args.size() == 1) {
+              name = AsStringLiteral(args[0].get());
+            } else if (args.size() == 2 &&
+                       func->function().value() == functions::kTarget) {
+              name = AsStringLiteral(args[1].get());
+            }
+            if (name) {
               EditTarget target{
                   .is_explicit = true,
                   .label = Label(source_file_.GetDir(), *name),
@@ -476,20 +609,28 @@ std::optional<EditTarget> BuildFile::find_target(std::string_view target_name) {
   return std::nullopt;
 }
 
-std::unique_ptr<ParseNode> BuildFile::to_node(const Value& value) {
+Result<std::unique_ptr<ParseNode>> BuildFile::parse_expression(
+    std::string_view expr_string) {
   auto file = std::make_unique<InputFile>(SourceFile("//dummy"));
-  file->SetContents(value.ToString(true));
+  file->SetContents(std::string(expr_string));
 
   Err err;
   std::vector<Token> tokens = Tokenizer::Tokenize(file.get(), &err);
+  RETURN_IF_ERROR(err);
   for (auto& token : tokens) {
     token.set_location(this->location());
   }
   auto parsed = Parser::ParseExpression(tokens, &err);
+  RETURN_IF_ERROR(err);
   extra_files_.push_back(std::move(file));
+  return std::move(parsed);
+}
+
+std::unique_ptr<ParseNode> BuildFile::to_node(const Value& value) {
+  auto parsed = parse_expression(value.ToString(true));
   // value.ToString() must return something parsable as input to GN.
-  DCHECK(!err.has_error());
-  return parsed;
+  DCHECK(!parsed.has_error());
+  return std::move(*parsed);
 }
 
 std::unique_ptr<IdentifierNode> BuildFile::create_identifier(
@@ -501,8 +642,11 @@ std::unique_ptr<IdentifierNode> BuildFile::create_identifier(
 
 std::unique_ptr<BinaryOpNode> BuildFile::create_assignment(
     std::string_view name,
-    std::unique_ptr<ParseNode> value) {
-  auto left = create_identifier(name);
+    std::unique_ptr<ParseNode> value,
+    Location loc) {
+  StringAtom atom(name);
+  auto left = std::make_unique<IdentifierNode>(
+      Token(loc.is_null() ? location() : loc, Token::IDENTIFIER, atom.str()));
 
   auto assign = std::make_unique<BinaryOpNode>();
   assign->set_op(Token(location(), Token::EQUAL, "="));
@@ -510,6 +654,49 @@ std::unique_ptr<BinaryOpNode> BuildFile::create_assignment(
   assign->set_right(std::move(value));
 
   return assign;
+}
+
+void BuildFile::assign_in_block(
+    BlockNode* block,
+    std::vector<std::unique_ptr<ParseNode>>::const_iterator it,
+    std::string_view name,
+    std::unique_ptr<ParseNode> value) {
+  CHECK(block);
+  Location loc;
+  // If GN sees:
+  // a = 1 (line 10)
+  // b = 2 (line 1 - defaulted)
+  // c = 3 (line 11)
+  // The formatter will decide to insert a blank line between b and c because
+  // there's a gap of more than one line. Thus, we attach it up to an adjacent
+  // element to prevent blank lines being inserted.
+  if (block->statements().empty()) {
+    loc = block->GetRange().begin();
+  } else if (it == block->statements().end()) {
+    loc = block->statements().back()->GetRange().end();
+  } else {
+    loc = (*it)->GetRange().begin();
+  }
+  block->statements().insert(it,
+                             create_assignment(name, std::move(value), loc));
+}
+
+void BuildFile::assign_in_block(BlockNode* block,
+                                std::string_view name,
+                                std::unique_ptr<ParseNode> value) {
+  CHECK(block);
+  auto target_order = GetAttributeOrder(name);
+  auto it = block->statements().end();
+  if (target_order) {
+    auto orders = GetOrders(block->statements());
+    for (size_t i = 0; i < orders.size(); ++i) {
+      if (orders[i] && *orders[i] >= *target_order) {
+        it = block->statements().begin() + i;
+        break;
+      }
+    }
+  }
+  assign_in_block(block, it, name, std::move(value));
 }
 
 std::unique_ptr<BlockNode> BuildFile::create_block(

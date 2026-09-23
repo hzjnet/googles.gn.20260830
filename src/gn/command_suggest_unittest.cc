@@ -105,11 +105,12 @@ TEST_F(SuggestTest, ResolveModuleName) {
   target.set_module_name("my_module");
 
   std::vector<const Target*> all_targets = {&target};
+  commands::TargetResolutionCache cache;
 
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, default_toolchain,
-        "my_module");
+        "my_module", /*must_be_file=*/false, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&target, commands::ApiScope::kPublic}};
     EXPECT_EQ(expected, results);
@@ -120,7 +121,7 @@ TEST_F(SuggestTest, ResolveModuleName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, default_toolchain,
-        "my_module_Private");
+        "my_module_Private", /*must_be_file=*/false, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&target, commands::ApiScope::kPrivate}};
     EXPECT_EQ(expected, results);
@@ -142,11 +143,13 @@ TEST_F(SuggestTest, ResolveTargetName) {
       setup_scope.settings(),
       Label(SourceDir("//"), "hello", SourceDir("//build/toolchain/"), "gcc"));
   std::vector<const Target*> all_targets = {&target, &target_gcc};
+  commands::TargetResolutionCache cache;
 
   // Test resolving "//:hello"
   auto [results_label, ok_label] = commands::ResolveSuggestionToTarget(
       setup_scope.build_settings(), all_targets,
-      setup_scope.toolchain()->label(), "//:hello");
+      setup_scope.toolchain()->label(), "//:hello", /*must_be_file=*/false,
+      cache);
 
   std::vector<std::pair<const Target*, commands::ApiScope>> expected_label = {
       {&target, commands::ApiScope::kPublic}};
@@ -156,7 +159,7 @@ TEST_F(SuggestTest, ResolveTargetName) {
   // Test resolving "//:hello(//build/toolchain:gcc)"
   auto [results_toolchain, ok_toolchain] = commands::ResolveSuggestionToTarget(
       setup_scope.build_settings(), all_targets, default_toolchain,
-      "//:hello(//build/toolchain:gcc)");
+      "//:hello(//build/toolchain:gcc)", /*must_be_file=*/false, cache);
 
   std::vector<std::pair<const Target*, commands::ApiScope>> expected_toolchain =
       {{&target_gcc, commands::ApiScope::kPublic}};
@@ -260,11 +263,12 @@ TEST_F(SuggestTest, ResolveFileName) {
   std::vector<const Target*> all_targets = {&explicit_target, &implicit_target,
                                             &simple_default,  &simple_secondary,
                                             &generated,       &included_target};
+  commands::TargetResolutionCache cache;
 
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//public.h");
+        "//public.h", /*must_be_file=*/true, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&explicit_target, commands::ApiScope::kPublic}};
     EXPECT_TRUE(ok);
@@ -274,7 +278,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "../../private.h");
+        "../../private.h", /*must_be_file=*/true, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&explicit_target, commands::ApiScope::kPrivate}};
     EXPECT_TRUE(ok);
@@ -284,7 +288,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//implicit_public.h");
+        "//implicit_public.h", /*must_be_file=*/true, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&implicit_target, commands::ApiScope::kPublic}};
     EXPECT_TRUE(ok);
@@ -294,14 +298,14 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "nonexistent_file.h");
+        "nonexistent_file.h", /*must_be_file=*/true, cache);
     EXPECT_FALSE(ok);
   }
 
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//out/Debug/generated_file.h");
+        "//out/Debug/generated_file.h", /*must_be_file=*/true, cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&generated, commands::ApiScope::kPublic}};
     EXPECT_TRUE(ok);
@@ -309,10 +313,11 @@ TEST_F(SuggestTest, ResolveFileName) {
   }
 
   all_targets.push_back(&consumer);
+  commands::TargetResolutionCache consumer_cache;
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//out/Debug/generated_file.h");
+        "//out/Debug/generated_file.h", /*must_be_file=*/true, consumer_cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected = {
         {&consumer, commands::ApiScope::kPublic}};
     EXPECT_TRUE(ok);
@@ -322,7 +327,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//no_target.h");
+        "//no_target.h", /*must_be_file=*/true, consumer_cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected_targets;
     EXPECT_TRUE(ok);
     EXPECT_EQ(expected_targets, results);
@@ -331,7 +336,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//default_toolchain.h");
+        "//default_toolchain.h", /*must_be_file=*/true, consumer_cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected_targets =
         {
             {&simple_secondary, commands::ApiScope::kPublic},
@@ -344,7 +349,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "//secondary_toolchain.h");
+        "//secondary_toolchain.h", /*must_be_file=*/true, consumer_cache);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected_targets =
         {{{&simple_secondary, commands::ApiScope::kPublic}}};
     EXPECT_TRUE(ok);
@@ -354,7 +359,7 @@ TEST_F(SuggestTest, ResolveFileName) {
   {
     auto [results, ok] = commands::ResolveSuggestionToTarget(
         setup_scope.build_settings(), all_targets, current_toolchain,
-        "my_header.h", &consumer);
+        "my_header.h", /*must_be_file=*/true, consumer_cache, &consumer);
     EXPECT_TRUE(ok);
     std::vector<std::pair<const Target*, commands::ApiScope>> expected_targets =
         {{{&included_target, commands::ApiScope::kPublic}}};
@@ -380,11 +385,10 @@ TEST_F(SuggestTest, OutputSuggestions) {
   };
 
   auto create_target = [&](std::string_view name, Target::OutputType type,
-                           auto fn) {
+                           auto fn, SourceDir dir = SourceDir("//")) {
     auto target = std::make_unique<Target>(
         setup_scope.settings(),
-        Label(SourceDir("//"), name, default_toolchain.dir(),
-              default_toolchain.name()));
+        Label(dir, name, default_toolchain.dir(), default_toolchain.name()));
     target->set_output_type(type);
     target->SetToolchain(setup_scope.toolchain());
     target->set_user_friendly_location(dummy_loc);
@@ -394,7 +398,7 @@ TEST_F(SuggestTest, OutputSuggestions) {
       target->set_module_type(module_type);
       target->set_module_name(std::string(name));
       target->public_headers().push_back(
-          SourceFile("//" + std::string(name) + ".h"));
+          SourceFile(dir.value() + std::string(name) + ".h"));
     }
     fn(target.get());
     Err err;
@@ -405,15 +409,20 @@ TEST_F(SuggestTest, OutputSuggestions) {
 
   auto includer = create_target("includer", Target::GROUP, [](Target*) {});
 
-  auto run_suggest = [&](std::string_view want) {
+  auto run_suggest_for = [&](std::string_view from, std::string_view want) {
     std::string output;
     auto collect = [&](std::string_view s, TextDecoration, HtmlEscaping) {
       output.append(s);
     };
-    commands::OutputSuggestions(all_targets, setup_scope.build_settings(),
-                                default_toolchain, "//:includer", want,
-                                collect);
+    commands::TargetResolutionCache cache;
+    commands::OutputSuggestions(
+        all_targets, setup_scope.build_settings(), default_toolchain, from,
+        /*includer_target=*/nullptr, want, collect, cache);
     return output;
+  };
+
+  auto run_suggest = [&](std::string_view want) {
+    return run_suggest_for("//:includer", want);
   };
 
   auto visible = create_target("visible", Target::SOURCE_SET,
@@ -429,6 +438,14 @@ TEST_F(SuggestTest, OutputSuggestions) {
       "at //BUILD.gn:1)\n"
       "  (`gn edit \"add public_deps :visible\" //:includer`)\n",
       run_suggest(visible->module_name()));
+
+  includer->private_deps().push_back(LabelTargetPair(visible.get()));
+  EXPECT_EQ(
+      "Suggestion: Add public_deps = [ \":visible\" ] to :includer "
+      "(defined at //BUILD.gn:1)\n"
+      "  (`gn edit \"add public_deps :visible\" //:includer`)\n",
+      run_suggest(visible->module_name()));
+  includer->private_deps().clear();
 
   auto invisible =
       create_target("invisible", Target::SOURCE_SET, [&](Target* t) {});
@@ -564,6 +581,34 @@ TEST_F(SuggestTest, OutputSuggestions) {
       "(defined at //BUILD.gn:1)\n"
       "  (`gn edit \"add public_deps :private_target\" //:includer`)\n",
       run_suggest("private_target_Private"));
+
+  auto pkg_target = create_target(
+      "pkg_target", Target::SOURCE_SET, [](Target* t) {}, SourceDir("//pkg/"));
+  auto pkg_includer = create_target(
+      "pkg_includer", Target::GROUP, [](Target*) {}, SourceDir("//pkg/sub/"));
+  auto other_exposer = create_target(
+      "other_exposer", Target::GROUP,
+      [&](Target* t) {
+        t->public_deps().push_back(LabelTargetPair(pkg_target.get()));
+        t->visibility().SetPublic();
+      },
+      SourceDir("//other/"));
+  auto parent_exposer = create_target(
+      "parent_exposer", Target::GROUP,
+      [&](Target* t) {
+        t->public_deps().push_back(LabelTargetPair(pkg_target.get()));
+        t->visibility().SetPublic();
+      },
+      SourceDir("//pkg/"));
+
+  // Disambiguate by package closeness: parent_exposer is in //pkg/, which is an
+  // ancestor of //pkg/sub/, so it is preferred over other_exposer in //other/.
+  EXPECT_EQ(
+      "Suggestion: Add public_deps = [ \"//pkg:parent_exposer\" ] to "
+      ":pkg_includer (defined at //BUILD.gn:1)\n"
+      "  (`gn edit \"add public_deps //pkg:parent_exposer\" "
+      "//pkg/sub:pkg_includer`)\n",
+      run_suggest_for("//pkg/sub:pkg_includer", pkg_target->module_name()));
 }
 
 TEST_F(SuggestTest, ApplyValidSuggestion) {
@@ -573,11 +618,13 @@ TEST_F(SuggestTest, ApplyValidSuggestion) {
 }
 
 source_set("included") {
-  sources = [ "included.h" ]
+  public = [ "included.h" ]
+  sources = [ "private.h" ]
 }
 )"},
       {SourceFile("//includer.cc"), ""},
       {SourceFile("//included.h"), ""},
+      {SourceFile("//private.h"), ""},
   });
 
   std::string output;
@@ -585,10 +632,12 @@ source_set("included") {
     output.append(s);
   };
 
+  commands::TargetResolutionCache cache;
   commands::SuggestResult result = commands::OutputSuggestions(
       project.targets(), &project.setup.build_settings(),
-      project.default_toolchain(), "//includer.cc", "//included.h", collect,
-      true, &project.setup);
+      project.default_toolchain(), "//includer.cc",
+      /*includer_target=*/nullptr, "//included.h", collect, cache,
+      /*must_be_file=*/false, /*apply=*/true, &project.setup);
 
   EXPECT_EQ(commands::SuggestResult::kSuccess, result);
   EXPECT_EQ(
@@ -602,9 +651,31 @@ source_set("included") {
 }
 
 source_set("included") {
-  sources = [ "included.h" ]
+  public = [ "included.h" ]
+  sources = [ "private.h" ]
 }
 )";
+  EXPECT_EQ(expected_build_gn, project.Read(SourceFile("//BUILD.gn")));
+
+  output.clear();
+  commands::TargetResolutionCache same_target_cache;
+  commands::SuggestResult same_target_result = commands::OutputSuggestions(
+      project.targets(), &project.setup.build_settings(),
+      project.default_toolchain(), "//included.h",
+      /*includer_target=*/nullptr, "//private.h", collect, same_target_cache,
+      /*must_be_file=*/false, /*apply=*/true, &project.setup);
+
+  EXPECT_EQ(commands::SuggestResult::kUnapplied, same_target_result);
+  EXPECT_EQ(
+      R"(Warning: "//private.h" is in the private API of //:included
+[AMBIGUOUS] Suggestion: Choose one of the following to resolve the intra-target include:
+* Create a new source_set for "private.h" and add it to public_deps in //:included (preferred)
+* Move "private.h" from `sources` to `public` in :included (defined at //BUILD.gn:5)
+  (`gn edit "move sources public private.h" //:included`)
+* Move "included.h" from `public` to `sources` in :included (defined at //BUILD.gn:5)
+  (`gn edit "move public sources included.h" //:included`)
+)",
+      output);
   EXPECT_EQ(expected_build_gn, project.Read(SourceFile("//BUILD.gn")));
 }
 
@@ -649,6 +720,58 @@ group("all") {
   std::string expected_build_gn = R"(executable("includer") {
   sources = [ "includer.cc" ]
   deps = [ "//included" ]
+}
+)";
+  EXPECT_EQ(expected_build_gn, project.Read(SourceFile("//includer/BUILD.gn")));
+}
+
+TEST_F(SuggestTest, CheckMovesPrivateDepToPublicDep) {
+  TestProject project({
+      {SourceFile("//BUILD.gn"), R"(
+group("all") {
+  deps = [
+    "//included",
+    "//includer",
+  ]
+}
+)"},
+      {SourceFile("//includer/BUILD.gn"), R"(source_set("includer") {
+  check_includes_strict = true
+  public = [ "includer.h" ]
+  sources = [ "includer.cc" ]
+  deps = [ "//included" ]
+}
+)"},
+      {SourceFile("//included/BUILD.gn"), R"(source_set("included") {
+  sources = [ "included.h" ]
+}
+)"},
+      {SourceFile("//includer/includer.h"), "#include \"included/included.h\""},
+      {SourceFile("//includer/includer.cc"), ""},
+      {SourceFile("//included/included.h"), ""},
+  });
+
+  std::string output;
+  auto collect = [&](std::string_view s, TextDecoration, HtmlEscaping) {
+    output.append(s);
+  };
+
+  EXPECT_TRUE(commands::CheckPublicHeaders(
+      &project.setup.build_settings(), project.targets(), project.targets(),
+      false, false, false, true, &project.setup, collect));
+  EXPECT_EQ(
+      "ERROR at //includer/includer.h:1:11: Public headers cannot include "
+      "private dependencies.\n"
+      "#include \"included/included.h\"\n"
+      "          ^\n"
+      "[APPLIED] Suggestion: Add public_deps = [ \"//included:included\" ] to "
+      ":includer (defined at //includer/BUILD.gn:1)\n",
+      output);
+  std::string expected_build_gn = R"(source_set("includer") {
+  check_includes_strict = true
+  public = [ "includer.h" ]
+  sources = [ "includer.cc" ]
+  public_deps = [ "//included" ]
 }
 )";
   EXPECT_EQ(expected_build_gn, project.Read(SourceFile("//includer/BUILD.gn")));

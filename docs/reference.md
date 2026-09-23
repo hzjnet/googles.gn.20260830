@@ -574,6 +574,7 @@
   output_conversion
   outputs
   public_configs
+  public_inputs
   public
   rebase
   script
@@ -777,15 +778,27 @@
       Example:
         gn edit "rename srcs sources" //src/tools:*
 
-  set <attribute>[:list] <value(s)>
+  set <attribute>[:list|:expr] <value(s)>
       Sets or overwrites the target's <attribute> to <value(s)>.
       If multiple values are provided, or if the ":list" suffix is
       appended to the attribute, <value(s)> is interpreted as a list.
+      If the ":expr" suffix is appended to the attribute, <value(s)>
+      is parsed as a raw GN expression (e.g. variable, list of variables,
+      or expression).
 
       Examples:
         gn edit "set testonly true" //src/tools:*
+          => testonly = true
+        gn edit "set output_name my_tool" //src/tools:*
+          => output_name = "my_tool"
+        gn edit "set deps:expr default_deps" //:foo
+          => deps = default_deps
         gn edit "set srcs:list foo.cc" //:foo
+          => srcs = [ "foo.cc" ]
         gn edit "set deps :bar :baz" //:foo
+          => deps = [ ":bar", ":baz" ]
+        gn edit "set deps:expr a + b" //:foo
+          => deps = a + b
 
   shard [sharded_target_type] [group_type]
       Splits the target's sources into fine-grained shard targets,
@@ -5291,6 +5304,14 @@
     public_deps = [ ":c" ]
   }
 ```
+
+#### **Allowlist**
+
+```
+  The use of allow_circular_includes_from can be restricted to a specific list
+  of target labels by setting allow_circular_includes_from_allowlist in the .gn
+  file. See "gn help dotfile".
+```
 ### <a name="var_arflags"></a>**arflags**: Arguments passed to static_library archiver.&nbsp;[Back to Top](#gn-reference)
 
 ```
@@ -7614,6 +7635,28 @@
 #### **Variables**
 
 ```
+  allow_circular_includes_from_allowlist [optional]
+      A list of target label patterns that have permission to use the
+      allow_circular_includes_from variable. If this list is defined, usages of
+      allow_circular_includes_from will be checked against this list and GN
+      will fail if the target label isn't in the list.
+
+      This is to allow the use of allow_circular_includes_from to be restricted
+      since circular dependencies between targets are discouraged and should
+      generally be avoided.
+
+      The format of this list is identical to that of "visibility" so see "gn
+      help visibility" for examples.
+
+      If unspecified, the ability to use allow_circular_includes_from is
+      unrestricted.
+
+      Example:
+        allow_circular_includes_from_allowlist = [
+          "//foo:*",
+          "//foo:bar",
+        ]
+
   arg_file_template [optional]
       Path to a file containing the text that should be used as the default
       args.gn content when you run `gn args`.

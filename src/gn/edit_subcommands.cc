@@ -12,6 +12,7 @@
 
 #include "base/containers/span.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "gn/build_file_editor.h"
 #include "gn/err.h"
 #include "gn/location.h"
@@ -49,6 +50,47 @@ Result<std::vector<Value>> ParseValues(base::span<const std::string> values) {
   return list_elements;
 }
 
+std::pair<std::string_view, std::optional<std::string_view>> SplitAttrType(
+    std::string_view arg) {
+  size_t colon_pos = arg.find(':');
+  if (colon_pos == std::string_view::npos) {
+    return {arg, std::nullopt};
+  }
+  return {arg.substr(0, colon_pos), arg.substr(colon_pos + 1)};
+}
+
+using ParseNodeGenerator =
+    std::function<Result<std::unique_ptr<ParseNode>>(BuildFile& build_file)>;
+
+Result<ParseNodeGenerator> CreateParseNodeGenerator(
+    std::optional<std::string_view> kind,
+    base::span<const std::string> values) {
+  CHECK(!values.empty());
+
+  if (kind == "expr") {
+    std::string expr_string = base::JoinString(
+        std::vector<std::string_view>(values.begin(), values.end()), " ");
+    return [expr_string = std::move(expr_string)](BuildFile& build_file) {
+      return build_file.parse_expression(expr_string);
+    };
+  } else if (kind == "list" || (!kind && values.size() > 1)) {
+    ASSIGN_OR_RETURN(std::vector<Value> out, ParseValues(values));
+    return [out = std::move(out)](
+               BuildFile& build_file) -> Result<std::unique_ptr<ParseNode>> {
+      return build_file.to_node(Value(nullptr, std::vector<Value>(out)));
+    };
+  } else if (!kind.has_value()) {
+    ASSIGN_OR_RETURN(Value val, ParseValue(values[0]));
+    return [val = std::move(val)](
+               BuildFile& build_file) -> Result<std::unique_ptr<ParseNode>> {
+      return build_file.to_node(val);
+    };
+  }
+
+  return Err(Location(), "Unknown type: :" + std::string(*kind),
+             "Supported types are :list and :expr.");
+}
+
 const TreeNode* FirstUnconditionalAssignment(
     const std::vector<TreeNode>& assignments) {
   for (const auto& assignment : assignments) {
@@ -75,7 +117,8 @@ EditCommand EditTargetCommand(
 bool RemoveFromTarget(const EditTarget& target,
                       const std::string& attribute,
                       const Value& value,
-                      EditState& state) {
+                      EditState& state,
+                      bool warn_if_missing = true) {
   bool done = false;
   for (auto& assignment : target.assignments(attribute)) {
     auto matches = FindListElementInAssignment(target, assignment, value);
@@ -86,7 +129,35 @@ bool RemoveFromTarget(const EditTarget& target,
     done |= !matches.empty();
   }
 
-  if (!done && target.is_explicit) {
+  if (done) {
+    auto assignments = target.assignments(attribute);
+    for (auto i = 0u; i < assignments.size(); ++i) {
+      auto& assign = assignments[i];
+      auto* op = assignments[i]->AsBinaryOpMut();
+      CHECK(op);
+      TreeNode* next =
+          i + 1 < assignments.size() ? &assignments[i + 1] : nullptr;
+
+      op->set_right(SimplifyExpression(op->take_right()));
+      if (IsEmptyList(op->right())) {
+        if (assign.is_modification() || assignments.size() == 1) {
+          assign.RemoveSelfUnconditionally();
+          // Transform a = []; a += ["..."] => a = ["..."]
+          // This can be safely done if `a = []` is unconditional, and either
+          // the += is unconditional, or we know it's the last assignment.
+        } else if (next && !assign.is_conditional() &&
+                   (!next->is_conditional() || assignments.size() == 2)) {
+          auto* next_op = next->node()->AsBinaryOpMut();
+          if (next_op->op().type() == Token::PLUS_EQUALS) {
+            next_op->set_op(Token(next_op->op().location(), Token::EQUAL, "="));
+            assign.RemoveSelfUnconditionally();
+          } else if (next_op->op().type() == Token::EQUAL) {
+            assign.RemoveSelfUnconditionally();
+          }
+        }
+      }
+    }
+  } else if (target.is_explicit && warn_if_missing) {
     target.add_warning(state, "does not contain the value " +
                                   value.ToString(true) + " in attribute \"" +
                                   attribute + "\".");
@@ -94,15 +165,50 @@ bool RemoveFromTarget(const EditTarget& target,
   return done;
 }
 
+// Returns whether |target| contains |value| in |attribute|.
+// Assignments using `-=` are filtered out.
+bool AttributeContainsValue(const EditTarget& target,
+                            std::string_view attribute,
+                            const Value& value) {
+  for (const auto& assignment : target.assignments(attribute)) {
+    if (const auto* op = assignment.node()->AsBinaryOp();
+        op && op->op().type() == Token::MINUS_EQUALS) {
+      continue;
+    }
+    if (!FindListElementInAssignment(target, assignment, value).empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void AddToTarget(BuildFile& build_file,
                  const EditTarget& target,
                  const std::string& attribute,
-                 const std::vector<Value>& values) {
+                 const std::vector<Value>& values,
+                 EditState& state) {
   auto assignments = target.assignments(attribute);
-  std::vector<Value> to_add = values;
-
-  // Iterate over a copy of values since we're mutating it.
+  std::vector<Value> to_add;
+  to_add.reserve(values.size());
   for (const auto& value : values) {
+    // Add deps when in public_deps -> no-op
+    // Add public_deps when in deps -> remove from deps
+    // Same for sources / public
+    if (attribute == "deps" &&
+        AttributeContainsValue(target, "public_deps", value)) {
+      continue;
+    } else if (attribute == "sources" &&
+               AttributeContainsValue(target, "public", value)) {
+      continue;
+    } else if (attribute == "public_deps") {
+      RemoveFromTarget(target, "deps", value, state,
+                       /*warn_if_missing=*/false);
+    } else if (attribute == "public") {
+      RemoveFromTarget(target, "sources", value, state,
+                       /*warn_if_missing=*/false);
+    }
+
+    bool already_present_unconditionally = false;
     for (auto& assignment : assignments) {
       auto matches = FindListElementInAssignment(target, assignment, value);
       for (const auto& match : matches) {
@@ -115,10 +221,18 @@ void AddToTarget(BuildFile& build_file,
         } else {
           // If it's added unconditionally, we don't need to worry about
           // adding it anymore.
-          std::erase(to_add, value);
+          already_present_unconditionally = true;
         }
       }
     }
+
+    if (!already_present_unconditionally) {
+      to_add.push_back(value);
+    }
+  }
+
+  if (to_add.empty()) {
+    return;
   }
 
   if (const auto* first = FirstUnconditionalAssignment(assignments); first) {
@@ -149,8 +263,8 @@ void AddToTarget(BuildFile& build_file,
       target_list->append_item(build_file.to_node(value));
     }
   } else if (!assignments.empty()) {
-    // Case B: attr is only defined conditionally -> add attr = [value] at the
-    // start of the block, change all other assignments to "+=".
+    // Case B: attr is only defined conditionally -> add attr = [value] right
+    // before the conditional statement, change all other assignments to "+=".
     for (auto& assignment : assignments) {
       if (auto* op = assignment->AsBinaryOpMut()) {
         if (op->op().type() == Token::EQUAL) {
@@ -158,17 +272,25 @@ void AddToTarget(BuildFile& build_file,
         }
       }
     }
-    target.block->statements().insert(
-        target.block->statements().begin(),
-        build_file.create_assignment(
-            attribute,
-            build_file.to_node(Value(nullptr, std::vector<Value>(to_add)))));
-  } else {
-    // Case C: attr is not defined -> add attr = [value] at the end of the
-    // block.
-    target.block->append_statement(build_file.create_assignment(
+
+    auto stack = assignments[0].stack();
+    while (stack.size() >= 2 && stack[stack.size() - 2] != target.block)
+      stack.pop_back();
+
+    build_file.assign_in_block(
+        target.block,
+        std::find_if(
+            target.block->statements().begin(),
+            target.block->statements().end(),
+            [node = stack.back()](const auto& s) { return s.get() == node; }),
         attribute,
-        build_file.to_node(Value(nullptr, std::vector<Value>(to_add)))));
+        build_file.to_node(Value(nullptr, std::vector<Value>(to_add))));
+  } else {
+    // Case C: attr is not defined -> insert attr = [value] at the canonically
+    // sorted position.
+    build_file.assign_in_block(
+        target.block, attribute,
+        build_file.to_node(Value(nullptr, std::vector<Value>(to_add))));
   }
 }
 
@@ -178,10 +300,11 @@ EditCommand AddToAttributeCommand(std::string attribute,
       [attribute = std::move(attribute), values = std::move(values)](
           BuildFile& build_file, const EditTarget& target,
           EditState& state) -> Err {
-        AddToTarget(build_file, target, attribute, values);
+        AddToTarget(build_file, target, attribute, values, state);
         return Ok();
       });
 }
+
 EditCommand DeleteCommand() {
   return EditTargetCommand([](BuildFile& build_file, const EditTarget& target,
                               EditState& state) -> Err {
@@ -200,12 +323,15 @@ EditCommand MoveCommand(std::string from_attribute,
                                EditState& state) -> Err {
     std::vector<Value> moved_values;
     for (const auto& value : values) {
-      if (RemoveFromTarget(target, from_attribute, value, state)) {
+      bool warn_if_missing =
+          !AttributeContainsValue(target, to_attribute, value);
+      if (RemoveFromTarget(target, from_attribute, value, state,
+                           warn_if_missing)) {
         moved_values.push_back(value);
       }
     }
     if (!moved_values.empty()) {
-      AddToTarget(build_file, target, to_attribute, moved_values);
+      AddToTarget(build_file, target, to_attribute, moved_values, state);
     }
     return Ok();
   });
@@ -294,27 +420,29 @@ EditCommand RenameAttributeCommand(std::string_view from_attribute,
   });
 }
 
-// Sets an attribute to a value.
-EditCommand SetCommand(std::string attribute, Value value) {
-  return EditTargetCommand([=](BuildFile& build_file, const EditTarget& target,
-                               EditState& state) -> Err {
-    auto assignments = target.assignments(attribute);
-    const auto* first = FirstUnconditionalAssignment(assignments);
-    for (const auto& assignment : assignments) {
-      if (&assignment != first) {
-        assignment.RemoveSelf(state, target);
-      }
-    }
+// Sets an attribute to an expression
+EditCommand SetCommand(std::string attribute, ParseNodeGenerator generator) {
+  return EditTargetCommand(
+      [attribute = std::move(attribute), generator = std::move(generator)](
+          BuildFile& build_file, const EditTarget& target,
+          EditState& state) -> Err {
+        ASSIGN_OR_RETURN(auto node, generator(build_file));
+        auto assignments = target.assignments(attribute);
+        const auto* first = FirstUnconditionalAssignment(assignments);
+        for (const auto& assignment : assignments) {
+          if (&assignment != first) {
+            assignment.RemoveSelf(state, target);
+          }
+        }
 
-    if (first) {
-      (*first)->AsBinaryOpMut()->set_right(build_file.to_node(value));
-    } else {
-      target.block->append_statement(
-          build_file.create_assignment(attribute, build_file.to_node(value)));
-    }
+        if (first) {
+          (*first)->AsBinaryOpMut()->set_right(std::move(node));
+        } else {
+          build_file.assign_in_block(target.block, attribute, std::move(node));
+        }
 
-    return Ok();
-  });
+        return Ok();
+      });
 }
 
 Result<std::string> GetShardName(const LocationRange& location,
@@ -519,28 +647,14 @@ Result<EditCommand> ParseCommand(std::vector<std::string> args) {
     if (args.size() < 3) {
       return Err(Location(),
                  "Invalid set command: missing attribute or value.\n"
-                 "Usage: set <attribute> <value...>");
+                 "Usage: set <attribute>[:type] <value...>");
     }
 
-    std::string_view attribute = args[1];
-    bool force_list = false;
-    constexpr std::string_view kListSuffix = ":list";
-    if (attribute.ends_with(kListSuffix)) {
-      attribute.remove_suffix(kListSuffix.size());
-      force_list = true;
-    }
-
-    auto value_args = base::make_span(args).subspan(2);
-    Value val;
-    if (value_args.size() > 1 || force_list) {
-      ASSIGN_OR_RETURN(std::vector<Value> list_elements,
-                       ParseValues(value_args));
-      val = Value(nullptr, std::move(list_elements));
-    } else {
-      ASSIGN_OR_RETURN(val, ParseValue(value_args[0]));
-    }
-
-    return SetCommand(std::string(attribute), std::move(val));
+    auto [attr, kind] = SplitAttrType(args[1]);
+    ASSIGN_OR_RETURN(
+        auto generator,
+        CreateParseNodeGenerator(kind, base::make_span(args).subspan(2)));
+    return SetCommand(std::string(attr), std::move(generator));
   } else if (args[0] == "shard") {
     if (args.size() == 1) {
       return ShardCommand();

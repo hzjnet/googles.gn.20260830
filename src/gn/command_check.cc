@@ -294,12 +294,10 @@ bool CheckPublicHeaders(const BuildSettings* build_settings,
   std::vector<HeaderChecker::Violation> violations;
   header_checker->Run(to_check, force_check, &violations);
 
-  Label default_toolchain = setup ? setup->loader()->default_toolchain_label()
-                                  : Label(SourceDir("//toolchain/"), "default");
-
   bool remaining_violations = false;
   bool needs_separator = false;
   bool has_suggestions = false;
+  TargetResolutionCache cache;
   for (auto& violation : violations) {
     if (needs_separator) {
       OutputString("___________________\n", DECORATION_YELLOW);
@@ -310,12 +308,14 @@ bool CheckPublicHeaders(const BuildSettings* build_settings,
     if (!violation.source_file.is_null() &&
         !violation.included_file.is_null()) {
       SuggestResult exit_code = OutputSuggestions(
-          all_targets, build_settings, default_toolchain,
-          violation.source_file.value(), violation.included_file.value(),
+          all_targets, build_settings,
+          violation.source_target->label().GetToolchainLabel(),
+          violation.source_file.value(), violation.source_target,
+          violation.included_file.value(),
           [&](std::string_view str, TextDecoration dec, HtmlEscaping esc) {
             buf.emplace_back(str, dec, esc);
           },
-          apply, setup);
+          cache, /*must_be_file=*/true, apply, setup);
       fixed = apply && (exit_code == SuggestResult::kSuccess);
       if (!buf.empty()) {
         has_suggestions = true;
