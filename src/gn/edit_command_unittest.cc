@@ -103,7 +103,7 @@ using EditCommandTest = TestWithScheduler;
 TEST_F(EditCommandTest, MultipleTargetsSubset) {
   EXPECT_SUCCESS(DoEdit("set testonly true", {"//:foo"},
                         R"(
-executable("foo") {
+target(my_target_type, "foo") {
   testonly = false
 }
 executable("bar") {
@@ -111,9 +111,10 @@ executable("bar") {
 }
 )"),
                  Edited(R"(
-executable("foo") {
+target(my_target_type, "foo") {
   testonly = true
 }
+
 executable("bar") {
   testonly = false
 }
@@ -130,9 +131,10 @@ executable("foo") {
 }
 
 TEST_F(EditCommandTest, AddSubcommand) {
-  EXPECT_SUCCESS(DoEdit("add deps //add1 //add2 //add3 :dep2",
+  EXPECT_SUCCESS(DoEdit("add deps //add1 //add2 //add3 :dep2 //in_public_deps",
                         R"(
 executable("foo") {
+  public_deps = [ "//in_public_deps" ]
   deps = [ "//dep1" ]
   deps += [ "//:dep2" ]
   if (is_linux) {
@@ -142,6 +144,7 @@ executable("foo") {
 )"),
                  Edited(R"(
 executable("foo") {
+  public_deps = [ "//in_public_deps" ]
   deps = [
     "//add1",
     "//add2",
@@ -182,7 +185,6 @@ executable("foo") {
                  Edited(R"(
 executable("foo") {
   deps = [ "//base" ]
-
   if (is_linux) {
     deps += [ "//dep" ]
   }
@@ -204,15 +206,57 @@ executable("foo") {
 }
 )"));
 
-  EXPECT_SUCCESS(DoEdit("add deps //base",
+  EXPECT_SUCCESS(DoEdit("add sources bar.cc foo.h",
                         R"(
 executable("foo") {
-  deps = other_deps
+  public = [ "foo.h" ]
+  sources = other_sources
 }
 )"),
                  Edited(R"(
 executable("foo") {
-  deps = [ "//base" ] + other_deps
+  public = [ "foo.h" ]
+  sources = [ "bar.cc" ] + other_sources
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("add public_deps //base",
+                        R"(
+executable("foo") {
+  sources = [ "foo.cc" ]
+  deps = [
+    "//base",
+    "//dep",
+  ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  sources = [ "foo.cc" ]
+  public_deps = [ "//base" ]
+  deps = [ "//dep" ]
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("add public foo.h",
+                        R"(
+executable("foo") {
+  sources = [
+    "foo.cc",
+    "foo.h",
+  ]
+  if (is_linux) {
+    deps = [ "//dep" ]
+  }
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  sources = [ "foo.cc" ]
+  public = [ "foo.h" ]
+  if (is_linux) {
+    deps = [ "//dep" ]
+  }
 }
 )"));
 }
@@ -292,6 +336,32 @@ executable("foo") {
                        {Err(Location(),
                             "Target \"//:foo\" does not contain the value "
                             "\"//nonexistent\" in attribute \"deps\".")}}));
+
+  EXPECT_SUCCESS(DoEdit("move deps public_deps //a",
+                        R"(
+executable("foo") {
+  deps = [ "//a" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  public_deps = [ "//a" ]
+}
+)"));
+
+  // Moving a value that already exists in the destination attribute should be
+  // a no-op with no warnings.
+  EXPECT_SUCCESS(DoEdit("move deps public_deps //a",
+                        R"(
+executable("foo") {
+  public_deps = [ "//a" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  public_deps = [ "//a" ]
+}
+)"));
 }
 
 TEST_F(EditCommandTest, NewSubcommand) {
@@ -306,6 +376,7 @@ executable("foo") {
 executable("foo") {
   sources = [ "foo.cc" ]
 }
+
 source_set("bar") {
 }
 )"));
@@ -320,6 +391,7 @@ executable("foo") {
                  Edited(R"(
 source_set("bar") {
 }
+
 executable("foo") {
   sources = [ "foo.cc" ]
 }
@@ -340,6 +412,7 @@ executable("baz") {
 executable("foo") {
   sources = [ "foo.cc" ]
 }
+
 source_set("bar") {
 }
 
@@ -363,8 +436,10 @@ executable("baz") {
 executable("foo") {
   sources = [ "foo.cc" ]
 }
+
 source_set("bar") {
 }
+
 source_set("qux") {
 }
 
@@ -453,7 +528,7 @@ executable("foo") {
 )"),
                  Edited(R"(
 executable("foo") {
-  deps = [] + [ "//foo:bar" ]
+  deps = [ "//foo:bar" ]
 }
 )"));
 
@@ -473,6 +548,93 @@ executable("foo") {
                                        "Target \"//:foo\" does not contain the "
                                        "value \"//nonexistent\" in attribute "
                                        "\"deps\".")}}));
+
+  EXPECT_SUCCESS(DoEdit("remove deps //base",
+                        R"(
+executable("foo") {
+  deps = [ "//base" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("remove deps //base",
+                        R"(
+executable("foo") {
+  deps = [ "//base" ]
+  if (is_linux) {
+    deps += [ "//linux" ]
+  }
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  if (is_linux) {
+    deps = [ "//linux" ]
+  }
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("remove deps //a",
+                        R"(
+executable("foo") {
+  deps = [ "//a" ]
+  deps += [ "//b" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  deps = [ "//b" ]
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("remove deps //base",
+                        R"(
+executable("foo") {
+  deps = [ "//base" ]
+  if (is_linux) {
+    deps += [ "//linux" ]
+  }
+  deps += [ "//other" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  deps = []
+  if (is_linux) {
+    deps += [ "//linux" ]
+  }
+  deps += [ "//other" ]
+}
+)"));
+
+  // When multiple assignments exist, an empty assignment must not be removed,
+  // and subsequent conditional += must not be converted to =.
+  EXPECT_SUCCESS(DoEdit("remove deps //base",
+                        R"(
+executable("foo") {
+  deps = [ "//base" ]
+  if (is_linux) {
+    deps += [ "//linux" ]
+  }
+  if (is_mac) {
+    deps += [ "//mac" ]
+  }
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  deps = []
+  if (is_linux) {
+    deps += [ "//linux" ]
+  }
+  if (is_mac) {
+    deps += [ "//mac" ]
+  }
+}
+)"));
 }
 
 TEST_F(EditCommandTest, RenameSubcommand) {
@@ -523,6 +685,21 @@ executable("foo") {
                  Edited(R"(
 executable("foo") {
   testonly = true
+}
+)"));
+
+  EXPECT_SUCCESS(DoEdit("set testonly true",
+                        R"(
+executable("foo") {
+  sources = [ "foo.cc" ]
+  deps = [ "//dep" ]
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  testonly = true
+  sources = [ "foo.cc" ]
+  deps = [ "//dep" ]
 }
 )"));
 
@@ -599,24 +776,41 @@ executable("foo") {
 executable("foo") {
   if (is_linux) {
     deps = [ "//linux" ]
-    public_deps = [ "//linux" ]
   }
 }
 )"),
                  Edited(
                      R"(
 executable("foo") {
+  deps = [ "//foo" ]
   if (is_linux) {
     # TODO(gn edit: set deps:list //foo): This would normally be deleted but is
     # conditional. Manual intervention is required to decide whether it should
     # actually be deleted.
     deps = [ "//linux" ]
-    public_deps = [ "//linux" ]
   }
-  deps = [ "//foo" ]
 }
 )",
                      EditState({Label(SourceDir("//"), "foo")})));
+
+  // Custom Expressions
+  EXPECT_SUCCESS(DoEdit("set str:expr default + \"a b\"",
+                        R"(
+executable("foo") {
+}
+)"),
+                 Edited(R"(
+executable("foo") {
+  str = default + "a b"
+}
+)"));
+
+  EXPECT_FAILURE(DoEdit("set deps:unknown a b",
+                        R"(
+executable("foo") {
+}
+)"),
+                 "Unknown type: :unknown");
 }
 
 TEST_F(EditCommandTest, ShardSubcommand) {
@@ -653,6 +847,7 @@ group("foo") {
   testonly = true
   visibility = [ "//..." ]
 }
+
 static_library("a") {
   sources = [
     "a.cc",
@@ -666,6 +861,7 @@ static_library("a") {
   testonly = true
   visibility = [ "//..." ]
 }
+
 static_library("c_win") {
   sources = []
   if (is_win) {
@@ -676,6 +872,7 @@ static_library("c_win") {
   testonly = true
   visibility = [ "//..." ]
 }
+
 static_library("foo_foo") {
   sources = [ "foo.h" ]
   if (is_win) {
@@ -686,6 +883,7 @@ static_library("foo_foo") {
   testonly = true
   visibility = [ "//..." ]
 }
+
 static_library("util_foo_bar") {
   sources = [
     "util/foo-bar.cc",
@@ -723,9 +921,11 @@ static_library("foo") {
     ":b",
   ]
 }
+
 source_set("a") {
   sources = [ "a.cc" ]
 }
+
 source_set("b") {
   sources = [ "b.cc" ]
 }
