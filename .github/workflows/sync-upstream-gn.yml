@@ -22,21 +22,23 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ matrix.base }}
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Add upstream remote
         run: git remote add upstream https://gn.googlesource.com/gn.git || true
       - name: Fetch upstream
         run: git fetch upstream --prune --tags
-      - name: Create sync branch and merge upstream
-        run: |
-          BRANCH_NAME=sync/upstream-${{ matrix.base }}-$GITHUB_RUN_ID
-          git checkout -B "$BRANCH_NAME"
-          git merge --no-edit "${{ matrix.upstream }}"
+      - name: Merge upstream
+        run: git merge --no-edit "${{ matrix.upstream }}"
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "Sync from upstream gn"
-          branch: sync/upstream-${{ matrix.base }}-${{ github.run_id }}
+          branch: sync/upstream-${{ matrix.base }}
+          delete-branch: true
           title: "chore: sync ${{ matrix.base }} from GN upstream"
           body: |
             Automated sync of `${{ matrix.base }}` from https://gn.googlesource.com/gn.git
